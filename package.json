@@ -20,6 +20,10 @@
       {
         "command": "site-monitor.checkSiteStatus",
         "title": "Verificar Status do Site"
+      },
+      {
+        "command": "site-monitor.removeSite", 
+        "title": "Remover Site"
       }
     ],
     "views": {
@@ -29,6 +33,25 @@
           "name": "Sites Monitorados"
         }
       ]
+    },
+    "menus": {
+      "tree/context": [
+        {
+          "command": "site-monitor.removeSite",
+          "when": "viewItem == site-monitor.sites"
+        }
+      ]
+    },
+    "configuration": {
+      "type": "object",
+      "title": "Configurações do Site Monitor",
+      "properties": {
+        "site-monitor.refreshInterval": {
+          "type": "number",
+          "default": 300000,
+          "description": "Intervalo de atualização em milissegundos para verificar o status dos sites monitorados."
+        }
+      }
     }
   },
   "scripts": {
