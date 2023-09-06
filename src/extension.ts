@@ -1,34 +1,48 @@
 import * as vscode from 'vscode';
-import axios from 'axios';
+import axios, { AxiosError } from 'axios';
 
 interface Site {
   name: string;
   url: string;
   status?: string;
   intervalId?: NodeJS.Timeout;
+  intervalInMinutes: boolean;
 }
 
 const sites: Site[] = [];
 let siteProvider: vscode.TreeView<Site>;
 
-function checkSiteStatus(site: Site) {
+async function checkSiteStatus(site: Site) {
   if (sites.length === 0) {
     return; // Evitar chamada à API quando a lista de sites estiver vazia
   }
 
-  axios.get(site.url)
-    .then((response) => {
-      site.status = response.status === 200 ? 'online' : 'offline';
-      const message = `O site ${site.name} está ${site.status === 'online' ? 'online' : 'offline'}.`;
-      vscode.window.showInformationMessage(message);
-      siteTreeDataProvider.refresh();
-    })
-    .catch((error) => {
-      site.status = 'offline';
+  try {
+    const response = await axios.get(site.url);
+    site.status = response.status === 200 ? 'online' : 'offline';
+    const message = `O site ${site.name} está ${site.status === 'online' ? 'online' : 'offline'}.`;
+    vscode.window.showInformationMessage(message);
+  } catch (error: any) {
+    if (axios.isAxiosError(error)) {
+      // Verifique se o erro é uma instância de AxiosError
+      const axiosError = error as AxiosError;
+      if (axiosError.response) {
+        // Se houver uma resposta de erro da API
+        vscode.window.showErrorMessage(`Erro ao verificar o site ${site.name}: ${axiosError.message}`);
+      } else {
+        // Caso contrário, tratamento genérico de erro
+        vscode.window.showErrorMessage(`Erro ao verificar o site ${site.name}: ${error.message}`);
+      }
+    } else {
+      // Tratamento genérico de erro
       vscode.window.showErrorMessage(`Erro ao verificar o site ${site.name}: ${error.message}`);
-      siteTreeDataProvider.refresh();
-    });
-    console.log(`Verificando status do site: ${site.name}`);
+    }
+    site.status = 'offline';
+  } finally {
+    siteTreeDataProvider.refresh(); // Chame refresh diretamente na instância de siteTreeDataProvider
+  }
+
+  console.log(`Verificando status do site: ${site.name}`);
 }
 
 class SiteTreeDataProvider implements vscode.TreeDataProvider<Site> {
@@ -61,7 +75,7 @@ class SiteTreeDataProvider implements vscode.TreeDataProvider<Site> {
   getChildren(element?: Site): Site[] {
     if (sites.length === 0) {
       // Mostrar uma mensagem quando não houver sites monitorados
-      return [{ name: 'Nenhum site está sendo monitorado.', url: '' }];
+      return [{ name: 'Nenhum site está sendo monitorado.', url: '', intervalInMinutes: true }];
     }
     return sites;
   }
@@ -69,8 +83,44 @@ class SiteTreeDataProvider implements vscode.TreeDataProvider<Site> {
 
 const siteTreeDataProvider = new SiteTreeDataProvider();
 
+async function addSiteCommand() {
+  const name = await vscode.window.showInputBox({
+    prompt: 'Digite o nome do site',
+    placeHolder: 'Exemplo: Meu Site',
+  });
+
+  const url = await vscode.window.showInputBox({
+    prompt: 'Digite a URL do site',
+    placeHolder: 'Exemplo: https://example.com',
+  });
+
+  const intervalOptions = ['Em minutos', 'Em segundos'];
+  const selectedInterval = await vscode.window.showQuickPick(intervalOptions, {
+    placeHolder: 'Selecione o intervalo de verificação',
+  });
+
+  if (!name || !url || !selectedInterval) {
+    return; // Saia se algum campo for vazio ou se o usuário cancelar
+  }
+
+  const site: Site = {
+    name,
+    url,
+    intervalInMinutes: selectedInterval === 'Em minutos',
+  };
+
+  sites.push(site);
+  siteTreeDataProvider.refresh();
+  startAutoCheck(site);
+
+  if (sites.length === 1) {
+    checkSiteStatus(site);
+  }
+}
+
 function startAutoCheck(site: Site) {
-  site.intervalId = setInterval(() => checkSiteStatus(site), 1 * 60 * 1000);
+  const intervalInSeconds = site.intervalInMinutes ? 60 : 1;
+  site.intervalId = setInterval(() => checkSiteStatus(site), intervalInSeconds * 1000);
 }
 
 export function activate(context: vscode.ExtensionContext) {
@@ -78,48 +128,34 @@ export function activate(context: vscode.ExtensionContext) {
     treeDataProvider: siteTreeDataProvider,
   });
 
-  const addSiteCommand = vscode.commands.registerCommand('site-monitor.addSite', async () => {
-    const name = await vscode.window.showInputBox({
-      prompt: 'Digite o nome do site',
-      placeHolder: 'Exemplo: Meu Site',
-    });
+  context.subscriptions.push(vscode.commands.registerCommand('site-monitor.addSite', addSiteCommand));
+  context.subscriptions.push(vscode.commands.registerCommand('site-monitor.removeSite', (site: Site) => removeSite(site)));
+  context.subscriptions.push(vscode.commands.registerCommand('site-monitor.checkSiteStatus', (site: Site) => checkSiteStatus(site)));
+  
+}
 
-    const url = await vscode.window.showInputBox({
-      prompt: 'Digite a URL do site',
-      placeHolder: 'Exemplo: https://example.com',
-    });
+function removeSite(site: Site) {
+  const index = sites.findIndex((s) => s.url === site.url);
 
-    if (name && url) {
-      const site: Site = { name, url };
-      sites.push(site);
-      siteTreeDataProvider.refresh();
-      startAutoCheck(site);
-      // Verificar o status somente se houver sites
-      if (sites.length === 1) {
-        checkSiteStatus(site);
-      }
-    }
-  });
+  if (index !== -1) {
+    const removedSite = sites.splice(index, 1)[0];
+    clearInterval(removedSite.intervalId);
+    siteTreeDataProvider.refresh();
+  }
+}
 
-  const removeSiteCommand = vscode.commands.registerCommand('site-monitor.removeSite', (site: Site) => {
-    const index = sites.findIndex((s) => s.url === site.url);
+const stopMonitoringCommand = vscode.commands.registerCommand('site-monitor.stopMonitoring', (site: Site) => {
+  stopMonitoringSite(site);
+});
 
-    if (index !== -1) {
-      const removedSite = sites.splice(index, 1)[0];
-      clearInterval(removedSite.intervalId);
-      siteTreeDataProvider.refresh();
-    }
-  });
+function stopMonitoringSite(site: Site) {
+  const index = sites.findIndex((s) => s.url === site.url);
 
-  const checkSiteStatusCommand = vscode.commands.registerCommand('site-monitor.checkSiteStatus', (site: Site) => {
-    if (site.name !== 'Nenhum site está sendo monitorado') {
-      checkSiteStatus(site);
-    }
-  });
-
-  context.subscriptions.push(addSiteCommand);
-  context.subscriptions.push(removeSiteCommand);
-  context.subscriptions.push(checkSiteStatusCommand);
+  if (index !== -1) {
+    const stoppedSite = sites.splice(index, 1)[0];
+    clearInterval(stoppedSite.intervalId);
+    siteTreeDataProvider.refresh();
+  }
 }
 
 export function deactivate() {}
